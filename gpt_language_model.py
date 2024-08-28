@@ -185,5 +185,5 @@ for iter in range(max_iters):
     loss.backward()
     optimizer.step()
 
-context = idx = torch.zeros((1, 1), dtype=torch.long).to(device)
+context = torch.zeros((1, 1), dtype=torch.long).to(device)
 print(decode(m.generate(context, max_new_tokens=1000)[0].tolist()))
