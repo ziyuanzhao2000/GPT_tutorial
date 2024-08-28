@@ -1,6 +1,13 @@
 import torch 
 import torch.nn as nn
 from torch.nn import functional as F
+import numpy as np
+
+##### Data generation hyperparams
+n_digit = 2   # how many digit at most for the summands in the addition problems
+max_summand = 10**n_digit
+len_prob = n_digit * 2 + 2
+len_answer = n_digit + 1
 
 ##### Scaled-up hyperparams
 # batch_size = 64
@@ -16,10 +23,10 @@ from torch.nn import functional as F
 # dropout = 0.2
 ##### Baby model hyperparams
 batch_size = 32
-block_size = 32 #k-gram
-max_iters = 5000
+block_size = len_prob + n_digit + 1 #k-gram
+max_iters = 2500
 eval_interval = 500
-learning_rate = 5e-3
+learning_rate = 1e-3
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 32
@@ -28,29 +35,30 @@ n_layer = 4
 dropout = 0.2
 
 torch.manual_seed(42)
+np.random.seed(42)
 
-with open('input.txt', 'r', encoding='utf-8') as f:
-    text = f.read()
-
-chars = sorted(list(set(text)))
+chars = [str(i) for i in range(10)] + ['+', '=', ' ']
 vocab_size = len(chars)
 stoi = { ch:i for i,ch in enumerate(chars) }
 itos = { i:ch for i,ch in enumerate(chars) }
+itos[-1] = '*'
 encode = lambda s: [stoi[c] for c in s]
 decode = lambda l: ''.join([itos[i] for i in l])
 
-data = torch.tensor(encode(text), dtype=torch.long)
-n = int(0.9*len(data))
-train_data = data[:n]
-val_data = data[n:]
 
-def get_batch(split):
-    # generate a small batch of data of inputs x and targets y
-    data = train_data if split == 'train' else val_data
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-    x, y = x.to(device), y.to(device)
+def mask(encoded):
+    encoded[:len_prob] = -1
+    return encoded
+
+def get_batch():
+    problems = []
+    for _ in range(batch_size):
+        a = np.random.randint(max_summand)
+        b = np.random.randint(max_summand)
+        prob = f'{a:{n_digit}}+{b:{n_digit}}={str(a+b)[::-1]:{n_digit+2}}'
+        problems.append(torch.tensor(encode(prob)))
+    x = torch.stack([prob[:block_size] for prob in problems])
+    y = torch.stack([mask(prob)[1:block_size+1] for prob in problems])
     return x, y
 
 @torch.no_grad()
@@ -60,7 +68,7 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y = get_batch()
             _, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
@@ -155,7 +163,9 @@ class GPTLanguageModel(nn.Module):
             B, T, C = logits.shape
             logits = logits.view(B*T, C)
             targets = targets.view(B*T)
-            loss = F.cross_entropy(logits, targets) # cross ent in pytorch takes inputs with channel at the second dimension
+            # cross ent in pytorch takes inputs with channel at the second dimension
+            # ignore -1 which masks the problem statement
+            loss = F.cross_entropy(logits, targets, ignore_index=-1) 
 
         return logits, loss
     
@@ -178,12 +188,16 @@ optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
 for iter in range(max_iters):
     if iter % eval_interval == 0:
         losses = estimate_loss()
-        print(f"Step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-    xb, yb = get_batch('train')
+        print(f"Step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}", flush=True)
+    xb, yb = get_batch()
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 
-context = idx = torch.zeros((1, 1), dtype=torch.long).to(device)
-print(decode(m.generate(context, max_new_tokens=1000)[0].tolist()))
+x = get_batch()[0].to(device).split(1, dim=0)
+for example in x:
+    context = example[:, :len_prob]
+    decoded = decode(m.generate(context, max_new_tokens=len_answer)[0].tolist())
+    decoded = decoded[:len_prob] + decoded[len_prob:][::-1] # reverse the inverted representation
+    print(decoded)
